@@ -1,67 +1,92 @@
 const socket = io();
 const map = L.map("map").setView([0, 0], 16);
 
-L.tileLayer("http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    attribution: "OpenStreetMap"
+// Secure HTTPS for tile layer
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap contributors"
 }).addTo(map);
 
 const markers = {};
 let myLocation = null;
 let routingControl = null;
+let mySocketId = null;
 
-// Send your location
+// Get and store socket ID safely
+socket.on("connect", () => {
+    mySocketId = socket.id;
+});
+
+// Send your location continuously
 if (navigator.geolocation) {
     navigator.geolocation.watchPosition((position) => {
         const { latitude, longitude } = position.coords;
         myLocation = [latitude, longitude];
         socket.emit('send-location', { latitude, longitude });
+
+        // Add or update your own marker
+        if (!markers["me"]) {
+            markers["me"] = L.marker(myLocation, { title: "You" }).addTo(map);
+        } else {
+            markers["me"].setLatLng(myLocation);
+        }
+
+        // Center map on your location only once
+        if (!map._centered) {
+            map.setView(myLocation, 16);
+            map._centered = true;
+        }
+
     }, (error) => {
-        console.error(error);
+        console.error("Geolocation error:", error);
     }, {
         enableHighAccuracy: true,
         timeout: 5000,
         maximumAge: 0
     });
+} else {
+    console.error("Geolocation not supported.");
 }
 
-// Handle location updates
+// Receive other users' locations
 socket.on("receive-location", (data) => {
     const { id, latitude, longitude } = data;
     const userLocation = [latitude, longitude];
 
     if (!markers[id]) {
-        markers[id] = L.marker(userLocation).addTo(map);
+        markers[id] = L.marker(userLocation, { title: `User ${id}` }).addTo(map);
     } else {
         markers[id].setLatLng(userLocation);
     }
 
-    // Draw routing only to the first "other" user
-    if (myLocation && id !== socket.id) {
+    // Only show route to one other user
+    if (myLocation && id !== mySocketId) {
         if (routingControl) {
             routingControl.setWaypoints([myLocation, userLocation]);
         } else {
             routingControl = L.Routing.control({
-                waypoints: [
-                    L.latLng(myLocation),
-                    L.latLng(userLocation)
-                ],
-                routeWhileDragging: false
+                waypoints: [L.latLng(myLocation), L.latLng(userLocation)],
+                routeWhileDragging: false,
+                draggableWaypoints: false,
+                createMarker: () => null // Optional: hide route markers
             }).addTo(map);
         }
     }
-
-    map.setView(userLocation); // Optional: center map
 });
 
-// Remove user marker and route when they disconnect
+// Handle disconnection of a user
 socket.on("user-disconnected", (id) => {
     if (markers[id]) {
         map.removeLayer(markers[id]);
         delete markers[id];
 
-        // If route was to this user, remove it
+        // Remove route if it's for this user
         if (routingControl) {
             routingControl.setWaypoints([]);
         }
     }
+});
+
+// Optional: log socket errors
+socket.on("connect_error", (err) => {
+    console.error("Socket connection error:", err);
 });
